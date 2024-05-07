@@ -1,75 +1,112 @@
+import { checkIdParam } from "../middlewares/deviceIdParam.middleware";
 import Controller from "../interfaces/controller.interface";
 import { Request, Response, NextFunction, Router } from 'express';
-import path = require("path");
-
-let testArr = [4,5,6,3,5,3,7,5,13,5,6,4,3,6,3,6];
+import DataService from "../modules/services/data.service";
+import Joi from "joi";
 
 class DataController implements Controller {
     public path = '/api/data';
     public router = Router();
+    public dataService = new DataService;
 
     constructor() {
         this.initializeRoutes();
     }
-    private initializeRoutes() {
-        this.router.get(`${this.path}/all`, this.getAllData);
-        this.router.get(`${this.path}/latest`, this.getLatestReadingsFromAllDevices);
-        this.router.post(`${this.path}/:id`, this.addData);
-        this.router.get(`${this.path}/:id`, this.getData);
-        this.router.get(`${this.path}/:id/latest`, this.getLatest);
-        this.router.get(`${this.path}/:id/:num`, this.getDataWithRange);
-        this.router.delete(`${this.path}/all`, this.deleteAll);
-        this.router.delete(`${this.path}/:id`, this.deleteData);
-    }
-    
-    private getLatestReadingsFromAllDevices = async (request: Request, response: Response, next: NextFunction) => {
-        const data = testArr;
-        response.status(200).json(data);
-     };
 
-     private getAllData = async (request: Request, response: Response, next: NextFunction) => {
-    const data = testArr;
-    response.status(200).json(data);
-}
+    private initializeRoutes() {
+        this.router.get(`${this.path}/latest`, this.getLatestReadingsFromAllDevices);
+        this.router.post(`${this.path}/:id`, checkIdParam, this.addData);
+        this.router.get(`${this.path}/:id/latest`, checkIdParam, this.getPeriodData);
+        this.router.get(`${this.path}/:id`, checkIdParam, this.getAllDeviceData);
+        this.router.get(`${this.path}/:id/:num`, checkIdParam, this.getPeriodData);
+        this.router.delete(`${this.path}/all`, this.cleanAllDevices);
+        this.router.delete(`${this.path}/:id`, checkIdParam, this.cleanDeviceData);
+    }
+
+    private getLatestReadingsFromAllDevices = async (request: Request, response: Response, next: NextFunction) => {
+        const newestData = await this.dataService.getAllNewset();
+        response.status(200).json(newestData);
+    }
 
     private addData = async (request: Request, response: Response, next: NextFunction) => {
-        const { elem } = request.body;
+        const { air } = request.body;
         const { id } = request.params;
-        testArr.push(Number(elem));
-        response.status(200).json(elem);
-     };    
 
-     private getData = async (request: Request, response: Response, next: NextFunction) => {
-        const {id} = request.params;
-        const data = testArr;
-        response.status(200).json(data[Number(id)]);
-    }
+        const schema = Joi.object({
+            air: Joi.array()
+                .items(
+                    Joi.object({
+                        id: Joi.number().integer().positive().required(),
+                        value: Joi.number().positive().required()
+                    })
+                )
+                .unique((a, b) => a.id === b.id),
+            deviceId: Joi.number().integer().positive().valid(parseInt(id, 10)).required()
+         });
 
-    private getLatest = async (request: Request, response: Response, next: NextFunction) => {
-        const {id} = request.params;
-        const data = testArr;
-        const max = data.reduce((a, b) => Math.max(a, b), -Infinity);
-        response.status(200).json(max);
-    }
+        const data = {
+            temperature: parseInt(air[0].value),
+            pressure: parseInt(air[1].value),
+            humidity: parseInt(air[2].value),
+            deviceId: parseInt(id)
+        }
 
-    private getDataWithRange = async (request: Request, response: Response, next: NextFunction) => {
-        const {id} = request.params;
-        const {num} = request.params;
-        response.status(200).json(testArr.splice(Number(id), Number(num)));
-    }
+        try {
+            await this.dataService.createData(data);
+            response.status(200).json(data);
+        } catch (error) {
+            console.error(`Validation Error: ${error.message}`);
+            response.status(400).json({ error: 'Invalid input data.' });
+        }
+    };
 
-    private deleteAll = async (request: Request, response: Response, next: NextFunction) => {
-        testArr = [];
-        response.status(200).json("Cleared");
-    }
+    private getPeriodData = async (request: Request, response: Response, next: NextFunction) => {
+        const { id, num } = request.params;
 
-    private deleteData = async (request: Request, response: Response, next: NextFunction) => {
-        const {id} = request.params;
-        const elem = testArr[Number(id)-1];
-        testArr.splice(Number(id)-1, 1)
-        response.status(200).json(`Id: ${id}, Element: ${elem}`);
-    }
-}
+        try {
+            if (num) {
+                const data = await this.dataService.query(id);
+                const startIndex = Math.max(0, data.length - Number(num));
+                const endIndex = Math.min(data.length, startIndex + Number(num));
+                const array = data.slice(startIndex, endIndex);
+                response.status(200).json(array);
+            } else {
+                const latestEntry = await this.dataService.get(id);
+                response.status(200).json(latestEntry);
+            }
+        } catch (error) {
+            console.error(`Error occurred while fetching data: ${error}`);
+            response.status(500).json({ error: 'Internal Server Error' });
+        }
+    };
 
-export default DataController;
+    private getAllDeviceData = async (request: Request, response: Response, next: NextFunction) => {
+        const { id } = request.params;
+        const allData = await this.dataService.query(id);
+        response.status(200).json(allData);
+    };
 
+    private cleanAllDevices = async (request: Request, response: Response, next: NextFunction) => {
+        try {
+            await this.dataService.deleteData("all");
+            response.status(200).json({ message: 'All devices data deleted successfully.' });
+        } catch (error) {
+            console.error(`Error occurred while cleaning all devices data: ${error}`);
+            response.status(500).json({ error: 'Internal Server Error' });
+        }
+    };
+
+    private cleanDeviceData = async (request: Request, response: Response, next: NextFunction) => {
+        const { id } = request.params;
+
+        try {
+            await this.dataService.deleteData(id);
+            response.status(200).json({ message: `Data for device with ID ${id} deleted successfully.` });
+        } catch (error) {
+            console.error(`Error occurred while cleaning data for device with ID ${id}: ${error}`);
+            response.status(500).json({ error: 'Internal Server Error' });
+        }
+    };
+ }
+
+ export default DataController;
